@@ -1,7 +1,8 @@
 use futures::future::BoxFuture;
+use std::future::Future;
 use thiserror::Error;
 
-use crate::{
+use rmcp_core::{
     error::Error as McpError,
     model::{
         CancelledNotification, CancelledNotificationParam, GetMeta, JsonRpcBatchRequestItem,
@@ -9,8 +10,14 @@ use crate::{
         JsonRpcRequest, JsonRpcResponse, Meta, NumberOrString, ProgressToken, RequestId,
         ServerJsonRpcMessage,
     },
-    transport::IntoTransport,
+    service_traits::{
+        AtomicU32ProgressTokenProvider, AtomicU32RequestIdProvider, DynService, ProgressTokenProvider,
+        RequestIdProvider, Service, ServiceRole, TransferObject, RequestContext as CoreRequestContext
+    },
 };
+
+use crate::transport::IntoTransport;
+
 #[cfg(feature = "client")]
 mod client;
 #[cfg(feature = "client")]
@@ -25,22 +32,38 @@ use tokio_util::sync::CancellationToken;
 #[cfg(feature = "tower")]
 pub use tower::*;
 use tracing::instrument;
+
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum ServiceError {
     #[error("Mcp error: {0}")]
     McpError(McpError),
     #[error("Transport error: {0}")]
-    Transport(std::io::Error),
+    Transport(#[from] std::io::Error),
     #[error("Unexpected response type")]
     UnexpectedResponse,
     #[error("task cancelled for reason {}", reason.as_deref().unwrap_or("<unknown>"))]
     Cancelled { reason: Option<String> },
     #[error("request timeout after {}", chrono::Duration::from_std(*timeout).unwrap_or_default())]
     Timeout { timeout: Duration },
+    #[error("Received batch request, but batching is not enabled")]
+    BatchingNotEnabled,
+    #[error("Received batch response outside of batch request context")]
+    UnexpectedBatchResponse,
+    #[error("Missing result or error in JSON-RPC response item")]
+    InvalidResponseItem,
+    #[error("Message sending failed")]
+    SendFailed,
+}
+
+impl From<McpError> for ServiceError {
+    fn from(e: McpError) -> Self {
+        ServiceError::McpError(e)
+    }
 }
 
 impl ServiceError {}
+
 trait TransferObject:
     std::fmt::Debug + Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static
 {
@@ -467,12 +490,10 @@ pub enum QuitReason {
 /// Request execution context
 #[derive(Debug, Clone)]
 pub struct RequestContext<R: ServiceRole> {
-    /// this token will be cancelled when the [`CancelledNotification`] is received.
-    pub ct: CancellationToken,
-    pub id: RequestId,
-    pub meta: Meta,
-    /// An interface to fetch the remote client or server
     pub peer: Peer<R>,
+    pub request_id: RequestId,
+    pub cancellation_token: CancellationToken,
+    pub progress_token: ProgressToken,
 }
 
 /// Use this function to skip initialization process
@@ -666,7 +687,7 @@ where
                             ct: context_ct,
                             id: id.clone(),
                             peer: peer.clone(),
-                            meta: request.get_meta().clone(),
+                            progress_token: request.get_meta().progress_token.clone(),
                         };
                         tokio::spawn(async move {
                             let result = service.handle_request(request, context).await;
