@@ -1,13 +1,19 @@
 [package]
 name = "rmcp-core"
-version = "0.1.0"
-edition = "2021"
+license = { workspace = true }
+version = { workspace = true }
+edition = { workspace = true }
+repository = { workspace = true }
+homepage = { workspace = true }
+readme = { workspace = true }
+description = "Rust Core Logic for Model Context Protocol"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 futures-core = { version = "0.3", optional = true } # Optional for async traits if needed
+chrono = "0.4.40"
 
 [features]
 default = []
